@@ -1,0 +1,369 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var aoi_thr = ee.FeatureCollection("users/XxGuisseppexX/river_area"),
+    chulucanas = ee.FeatureCollection("users/XxGuisseppexX/chulucanas");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+
+//****************************************************************************************//
+/*The code was engineered to quantitatively assess the flood-impacted expanse within the  *
+  Chulucanas District, located in Piura, Peru. This hydrological anomaly was precipitated *
+  by unprecedented rainfall spanning March 17 to 18, as documented in the INDECI 2017     *
+  report. The analytical framework incorporated temporal satellite imagery analysis,      *
+  selecting pivotal dates proximal to the hydrometeorological event. Initial temporal     *
+  anchor was set at October 15, corresponding to the antecedent dry season, corroborated  *
+  through Sentinel 2 satellite imagery. A subsequent temporal marker was placed on October*
+  20, in immediate succession to the flood event. Furthermore, the analysis utilized      *
+  Synthetic Aperture Radar imagery, specifically S1 Ground Range Detected (GRD) data, to  *
+  enhance the precision of the flood extent quantification.                               *
+***************************************************************************************** */
+
+
+// Change to variable to work faster
+// District where the flood event will be analysed
+var image1=chulucanas;
+// Reduced area within the District for accurate calculation of thresholds
+var thr=aoi_thr;
+// Possible study area is shown and focused (not important).
+Map.centerObject(image1, 10);
+
+// Essential characteristics of Sentinel 1 imagery to be used
+var orbit='DESCENDING';
+var polar='VV';
+
+// Obtaining Sentinel-1 images, using the GRD collection 
+var s1Collection=ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.eq('orbitProperties_pass', orbit))
+  .filterMetadata('resolution_meters', 'equals' , 10)
+  .filterBounds(image1)
+  .select(polar);
+
+// Set range of dates:
+  // Before flood event 
+  var bef_start='2016-10-01';
+  var bef_end  ='2016-10-30';
+  // After flood event
+  var aft_start='2017-03-13';
+  var aft_end  ='2017-03-25';
+
+// Filter of selected dates from the collection S1
+var bef_flood=s1Collection.filterDate(bef_start,bef_end);
+var aft_flood=s1Collection.filterDate(aft_start,aft_end);
+
+// Print on console the number of images that fall within the selected range of days.
+    // Create a function to extract the metadata inside S1 images
+      function dates(dtes){
+        var range = dtes.reduceColumns(ee.Reducer.minMax(), ["system:time_start"]);
+        var printed = ee.String('from ')
+          .cat(ee.Date(range.get('min')).format('YYYY-MM-dd'))
+          .cat(' to ')
+          .cat(ee.Date(range.get('max')).format('YYYY-MM-dd'));
+        return printed;
+      }
+      
+      
+// Using the above function, print the selected dates on the console.
+  var before_count = bef_flood.size();
+  print(ee.String('S1 Image selected: Before Flood ').cat('(').cat(before_count).cat(')'),
+    dates(bef_flood), bef_flood);
+      
+  var after_count = aft_flood.size();
+  print(ee.String('S1 Image selected: After Flood ').cat('(').cat(after_count).cat(')'),
+   dates(aft_flood), aft_flood);
+
+
+// Transforms the collection of selected images into a list for efficient use in the code.
+var bef_lstImages = bef_flood.toList(bef_flood.size());
+var aft_lstImages = aft_flood.toList(aft_flood.size());
+
+// Show selected S1 images before and after the flooding event, for the District of Chulucanas.
+Map.addLayer(ee.Image(bef_lstImages.get(0)).clip(image1), {min:-30,max:0}, 'Before_flood_Big',1);
+Map.addLayer(ee.Image(aft_lstImages.get(0)).clip(image1), {min:-30,max:0}, 'After_flood_Big',1);
+
+
+//******************************************************************************************// 
+/*In the following lines the calculation of threshold values will be made, USING a reduced  *
+  area with 50 water - 50 land characteristics. In order to obtain a more accurate threshold*
+  value.                                                                                    *
+******************************************************************************************* */
+ 
+// Select the first image from the list created, and clip it to obtain the reduced area.
+var befAoi_clip = ee.Image(bef_lstImages.get(0)).clip(thr);
+var aftAoi_clip = ee.Image(aft_lstImages.get(0)).clip(thr);
+
+// To reduce the spatial noise caused by the "salt-and-pepper" effect, a smoothing 
+// was used
+var smoothing_thre_radius = 33;
+var before_thre_filtered = befAoi_clip.focal_mean(smoothing_thre_radius, 'circle', 'meters');
+var after_thre_filtered = aftAoi_clip.focal_mean(smoothing_thre_radius, 'circle', 'meters');
+
+
+// Apply a reducer to all pixels and create a dB histogram with the "reducer.histogram".
+// Histogram before flooding
+var bef_histo=ee.Dictionary(
+   before_thre_filtered.reduceRegion({
+       reducer: ee.Reducer.histogram(512, 0.1),
+       geometry: thr,
+       scale: 10,
+       maxPixels: 1e10
+   }).get(polar)
+);
+// Histogram after flooding
+var aft_histo=ee.Dictionary(
+   after_thre_filtered.reduceRegion({
+       reducer: ee.Reducer.histogram(512, 0.1),
+       geometry: thr,
+       scale: 10,
+       maxPixels: 1e10
+   }).get(polar)
+);
+
+// Extract out the histogram buckets and counts per bucket.
+var x=ee.List(bef_histo.get('bucketMeans'));
+var y=ee.List(bef_histo.get('histogram'));
+
+// Define a list of values to plot.
+var dataCol=ee.Array.cat([x, y], 1).toList();
+
+// Define the header information for data.
+var columnHeader=ee.List([
+   [
+   {
+       label: 'Backscatter',
+       role: 'domain',
+       type: 'number'
+   },
+   {
+       label: 'Values',
+       role: 'data',
+       type: 'number'
+   }, ]
+]);
+
+/***********************************************************************************
+ * OTSU thresholding was performed using the code written by Market et al. (2024)
+ * 
+ * Ref:
+ * Market, K., Donchyts, G., & Haag, A. (2024). Aquatic and Hydrological Applications:
+ *  Surface Water Mapping. In J. Carille, M. Crowley, D. Saah, & N. Clinton (Eds.),
+ *  Cloud-Based Remote Sensing with Google Earth Engine: Fundamentals and Applications (p. 1210). 
+ *  Springer. https://doi.org/10.1007/978-3-031-26588-4
+ **************************************************************************************************/
+ 
+ 
+//------------------- OTSU HISTOGRAM -----------------------//
+function otsu(histogram) {
+   // Make sure histogram is an ee.Dictionary object.
+   histogram=ee.Dictionary(histogram);
+   // Extract relevant values into arrays.
+   var counts=ee.Array(histogram.get('histogram'));
+   var means=ee.Array(histogram.get('bucketMeans'));
+   // Calculate single statistics over arrays
+   var size=means.length().get([0]);
+   var total=counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+   var sum=means.multiply(counts).reduce(ee.Reducer.sum(), [0])
+       .get([0]);
+   var mean=sum.divide(total);
+   // Compute between sum of squares, where each mean partitions the data.
+   var indices=ee.List.sequence(1, size);
+   var bss=indices.map(function(i){
+       var aCounts=counts.slice(0, 0, i);
+       var aCount=aCounts.reduce(ee.Reducer.sum(), [0])
+           .get([0]);
+       var aMeans=means.slice(0, 0, i);
+       var aMean=aMeans.multiply(aCounts)
+           .reduce(ee.Reducer.sum(), [0]).get([0])
+           .divide(aCount);
+       var bCount=total.subtract(aCount);
+       var bMean=sum.subtract(aCount.multiply(aMean))
+           .divide(bCount);
+       return aCount.multiply(aMean.subtract(mean).pow(2))
+           .add(
+               bCount.multiply(bMean.subtract(mean).pow(2)));
+   });
+   // Return the mean value corresponding to the maximum BSS.
+   return means.sort(bss).get([-1]);
+}
+//------------------------------------------------------------------------------------//
+
+
+// Apply the OTSU function and obtain threshold values
+var bef_thr=otsu(bef_histo);
+var aft_thr=otsu(aft_histo);
+// Print values on console Threshold values before and after flooding
+print('Before threshold value:', bef_thr);
+print('After threshold value:', aft_thr);
+
+// Create list of empty strings that will be used for annotation.
+var thresholdCol=ee.List.repeat('', x.length());
+// Find the index where the bucketMean equals the threshold.
+var threshIndex=x.indexOf(bef_thr);
+// Set the index to the annotation text.
+thresholdCol=thresholdCol.set(threshIndex, 'Otsu Threshold');
+
+// Redefine the column header information with annotation column.
+columnHeader=ee.List([
+   [
+   {
+       label: 'Backscatter',
+       role: 'domain',
+       type: 'number'
+   },
+   {
+       label: 'Values',
+       role: 'data',
+       type: 'number'
+   },
+   {
+       label: 'Threshold',
+       role: 'annotation',
+       type: 'string'
+   }]
+]);
+
+
+// Loop through the data rows and add the annotation column.
+dataCol=ee.List.sequence(0, x.length().subtract(1))
+  .map(function(i){
+    i=ee.Number(i);
+    var row=ee.List(dataCol.get(i));
+    return row.add(ee.String(thresholdCol.get(i)));
+  });
+
+// Concat the header and data for plotting.
+var dataTable=columnHeader.cat(dataCol);
+
+// Create Histogram plot of dB values using "ui.Chart.images"
+// Use 'evaluate' to transfer the server-side table to the client.
+dataTable.evaluate(function(dataTableClient){
+   // loop through the client-side table and set empty strings to null
+   for (var i=0; i < dataTableClient.length; i++){
+     if (dataTableClient[i][2]===''){
+       dataTableClient[i][2]=null;
+       }
+     }
+   
+   var chart=ui.Chart(dataTableClient)
+       .setChartType('AreaChart')
+       .setOptions({
+           title: 
+               ' Histogram with threshold value [dB] before flooding',
+           hAxis: {
+               title: 'Backscatter [dB]',
+               viewWindow:{
+                   min: -35,
+                   max: 15
+               }
+           },
+           vAxis:{
+               title: 'Count'
+           },
+           annotations:{
+               style: 'line'
+           }
+       });
+   print(chart);
+  });
+
+/*
+// Create water Mask
+var mask_water_bef = before_thre_filtered.lt(bef_thr);
+var mask_water_aft = after_thre_filtered.lt(aft_thr);
+
+
+var flooded_area = mask_water_aft.subtract(mask_water_bef);
+var flooded = flooded_area.updateMask(flooded_area);
+
+//Map.addLayer(mask_water.selfMask(), {palette:'Blue'},'Water');
+//Map.addLayer(flooded,{palette:'blue'},'Flooded Area');
+
+// Compute connectivity of pixels to eliminate those connected to 8 or fewer neighbours
+// This operation reduces noise of the flood extent product 
+var connections = flooded.connectedPixelCount();    
+var flooded = flooded.updateMask(connections.gte(8));
+
+
+// Mask out areas with more than 5 percent slope using a Digital Elevation Model 
+var DEM = ee.Image('WWF/HydroSHEDS/03VFDEM');
+var terrain = ee.Algorithms.Terrain(DEM);
+var slope = terrain.select('slope');
+var flooded = flooded.updateMask(slope.lt(4));
+      
+//Map.addLayer(flooded,{palette:'brown'},'Flooded Slope');
+*/
+
+//*******************************************************************************//
+/*The threshold values obtained from the "Reduced Area" are applied to calculate* 
+  the area of flooded water in the District of Chulucanas.                      *
+******************************************************************************* */
+
+//Apply smoothing to reduce the "salt-and-peper" effect in the District of Chulucanas before and after the flooding.
+var before_filt = ee.Image(bef_lstImages.get(0))
+    .clip(image1)
+    .focal_mean(smoothing_thre_radius, 'circle', 'meters');
+    
+var after_filt  = ee.Image(aft_lstImages.get(0))
+    .clip(image1)
+    .focal_mean(smoothing_thre_radius, 'circle', 'meters');
+
+
+// Create a water mask in the District of Chulucanas with threshold values.
+var maskWater_bef = before_filt.lt(bef_thr);
+var maskWater_aft = after_filt.lt(aft_thr);
+      
+//  Map.addLayer(maskWater_bef.selfMask(),{palette:'green'},'Water mask before');
+//  Map.addLayer(maskWater_aft.selfMask(),{palette:'yellow'},'Water mask after');
+
+// Create a water mask in the District of Chulucanas with the threshold values obtained.
+var floodedArea = maskWater_aft.subtract(maskWater_bef);
+var Flood = floodedArea.updateMask(floodedArea);
+
+// Compute connectivity of pixels to eliminate those connected to 8 or fewer neighbours
+// This operation reduces noise of the flood extent product 
+var connections = Flood.connectedPixelCount();    
+var Flood = Flood.updateMask(connections.gte(8));
+
+// Mask out areas with more than 4 percent slope using a Digital Elevation Model 
+var DEM = ee.Image('WWF/HydroSHEDS/03VFDEM');
+var terrain = ee.Algorithms.Terrain(DEM);
+var slope = terrain.select('slope');
+var Flood = Flood.updateMask(slope.lt(4));
+      
+Map.addLayer(Flood,{palette:'blue'},'Flooded area');
+
+//-------------------------------------------------------------------------//
+// Export flooded area as TIFF file 
+Export.image.toDrive({
+  image: Flood, 
+  description: 'Flood_extent_raster',
+  fileNamePrefix: 'flooded',
+  region: image1, 
+  maxPixels: 1e10
+});
+
+// Export flooded area as shapefile (for further analysis in e.g. QGIS)
+// Convert flood raster to polygons
+var flooded_vec = Flood.reduceToVectors({
+  scale: 10,
+  geometryType:'polygon',
+  geometry: image1,
+  eightConnected: false,
+  bestEffort:true,
+  tileScale:2,
+});
+
+// Export flood polygons as shape-file
+Export.table.toDrive({
+  collection:flooded_vec,
+  description:'Flood_extent_vector',
+  fileFormat:'SHP',
+  fileNamePrefix:'flooded_vec'
+});
+
+
+
+
+
+
+
+
