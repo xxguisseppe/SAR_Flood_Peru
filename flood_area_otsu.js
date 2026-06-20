@@ -3,6 +3,18 @@ var aoi_thr = ee.FeatureCollection("users/XxGuisseppexX/river_area"),
     chulucanas = ee.FeatureCollection("users/XxGuisseppexX/chulucanas");
 /***** End of imports. If edited, may not auto-convert in the playground. *****/
 
+/*
+Project: SAR Flood Mapping in Northern Peru
+Platform: Google Earth Engine
+Data: Sentinel-1 GRD
+Method: Otsu thresholding
+Event: 2017 Coastal El Nino flood event
+Author: Guisseppe A. Vasquez Villano
+
+Note:
+The imported FeatureCollections are private Google Earth Engine assets.
+Replace these private assets with your own AOI assets before running the script.
+*/
 
 //****************************************************************************************//
 /*The code was engineered to quantitatively assess the flood-impacted expanse within the  *
@@ -18,19 +30,25 @@ var aoi_thr = ee.FeatureCollection("users/XxGuisseppexX/river_area"),
 ***************************************************************************************** */
 
 
-// Change to variable to work faster
-// District where the flood event will be analysed
+//------------------------------------------------------------------------------
+// Study area
+//------------------------------------------------------------------------------
+
+// District where the flood event will be analysed.
 var image1=chulucanas;
-// Reduced area within the District for accurate calculation of thresholds
+// Reduced area within the District for accurate calculation of thresholds.
 var thr=aoi_thr;
-// Possible study area is shown and focused (not important).
 Map.centerObject(image1, 10);
 
-// Essential characteristics of Sentinel 1 imagery to be used
+//------------------------------------------------------------------------------
+// Sentinel-1 configuration
+//------------------------------------------------------------------------------
+
+// Essential characteristics of Sentinel-1 imagery to be used.
 var orbit='DESCENDING';
 var polar='VV';
 
-// Obtaining Sentinel-1 images, using the GRD collection 
+// Obtaining Sentinel-1 images using the GRD collection.
 var s1Collection=ee.ImageCollection('COPERNICUS/S1_GRD')
   .filter(ee.Filter.eq('instrumentMode', 'IW'))
   .filter(ee.Filter.eq('orbitProperties_pass', orbit))
@@ -38,11 +56,15 @@ var s1Collection=ee.ImageCollection('COPERNICUS/S1_GRD')
   .filterBounds(image1)
   .select(polar);
 
-// Set range of dates:
-  // Before flood event 
+//------------------------------------------------------------------------------
+// Pre-flood and post-flood date selection
+//------------------------------------------------------------------------------
+
+// Set range of dates.
+  // Before flood event.
   var bef_start='2016-10-01';
   var bef_end  ='2016-10-30';
-  // After flood event
+  // After flood event.
   var aft_start='2017-03-13';
   var aft_end  ='2017-03-25';
 
@@ -80,6 +102,9 @@ var aft_lstImages = aft_flood.toList(aft_flood.size());
 Map.addLayer(ee.Image(bef_lstImages.get(0)).clip(image1), {min:-30,max:0}, 'Before_flood_Big',1);
 Map.addLayer(ee.Image(aft_lstImages.get(0)).clip(image1), {min:-30,max:0}, 'After_flood_Big',1);
 
+//------------------------------------------------------------------------------
+// SAR filtering and preprocessing
+//------------------------------------------------------------------------------
 
 //******************************************************************************************// 
 /*In the following lines the calculation of threshold values will be made, USING a reduced  *
@@ -151,7 +176,10 @@ var columnHeader=ee.List([
  **************************************************************************************************/
  
  
-//------------------- OTSU HISTOGRAM -----------------------//
+//------------------------------------------------------------------------------
+// Otsu thresholding
+//------------------------------------------------------------------------------
+
 function otsu(histogram) {
    // Make sure histogram is an ee.Dictionary object.
    histogram=ee.Dictionary(histogram);
@@ -314,9 +342,17 @@ var maskWater_aft = after_filt.lt(aft_thr);
 //  Map.addLayer(maskWater_bef.selfMask(),{palette:'green'},'Water mask before');
 //  Map.addLayer(maskWater_aft.selfMask(),{palette:'yellow'},'Water mask after');
 
+//------------------------------------------------------------------------------
+// Flood mask generation
+//------------------------------------------------------------------------------
+
 // Create a water mask in the District of Chulucanas with the threshold values obtained.
 var floodedArea = maskWater_aft.subtract(maskWater_bef);
 var Flood = floodedArea.updateMask(floodedArea);
+
+//------------------------------------------------------------------------------
+// Post-processing
+//------------------------------------------------------------------------------
 
 // Compute connectivity of pixels to eliminate those connected to 8 or fewer neighbours
 // This operation reduces noise of the flood extent product 
@@ -328,16 +364,44 @@ var DEM = ee.Image('WWF/HydroSHEDS/03VFDEM');
 var terrain = ee.Algorithms.Terrain(DEM);
 var slope = terrain.select('slope');
 var Flood = Flood.updateMask(slope.lt(4));
-      
+
+//------------------------------------------------------------------------------
+// Flooded area calculation
+//------------------------------------------------------------------------------
+
+var floodPixelArea = Flood.gt(0).selfMask().multiply(ee.Image.pixelArea());
+var floodAreaStats = floodPixelArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: image1,
+  scale: 10,
+  maxPixels: 1e10
+});
+
+var floodAreaSqm = ee.Number(floodAreaStats.get(polar));
+var floodAreaHa = floodAreaSqm.divide(10000);
+var floodAreaSqkm = floodAreaSqm.divide(1000000);
+
+print('Flooded area (square metres):', floodAreaSqm);
+print('Flooded area (hectares):', floodAreaHa);
+print('Flooded area (square kilometres):', floodAreaSqkm);
+
+//------------------------------------------------------------------------------
+// Visualization
+//------------------------------------------------------------------------------
+
 Map.addLayer(Flood,{palette:'blue'},'Flooded area');
 
-//-------------------------------------------------------------------------//
+//------------------------------------------------------------------------------
+// Export
+//------------------------------------------------------------------------------
+
 // Export flooded area as TIFF file 
 Export.image.toDrive({
   image: Flood, 
   description: 'Flood_extent_raster',
   fileNamePrefix: 'flooded',
   region: image1, 
+  scale: 10,
   maxPixels: 1e10
 });
 
